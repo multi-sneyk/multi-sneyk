@@ -3,12 +3,10 @@
 
 """
 Klient gry Snake wieloosobowej.
-Zmiany:
-- Klawisz 'r' wysyła żądanie restartu gry (dowolny gracz może to zrobić).
-- Węże rosną po zjedzeniu jabłka (obsługiwane po stronie serwera).
-- Listy graczy i stanu analogicznie do poprzedniej wersji.
+Klawisz 'r' wysyła żądanie restartu gry do serwera,
+który resetuje stan i ponownie dodaje wszystkie wcześniej podłączone player_id.
 
-Autor: ChatGPT
+Po zjedzeniu jabłka wąż rośnie (obsługiwane po stronie serwera).
 """
 
 import argparse
@@ -104,9 +102,6 @@ class SnakeClient:
         self.send_to_server(msg)
 
     def send_restart(self):
-        """
-        Wysyła żądanie restartu gry do serwera.
-        """
         msg = {
             "type": "restart_game",
             "player_id": self.player_id
@@ -164,7 +159,6 @@ class SnakeClient:
                     self.running = False
                     break
                 elif key == ord('r'):
-                    # Restart gry
                     self.send_restart()
                 elif key in KEY_TO_DIRECTION:
                     self.send_move(KEY_TO_DIRECTION[key])

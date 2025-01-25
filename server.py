@@ -3,11 +3,9 @@
 
 """
 Serwer gry Snake wieloosobowej z użyciem RabbitMQ.
-Nowe wymagania:
-- Możliwość restartu gry klawiszem 'r' (od dowolnego gracza).
-- Węże faktycznie rosną po zjedzeniu jabłka.
-- Większe mapy (20x40).
-- Gracze startują w samym środku, ale w różnych kolumnach.
+Poprawki:
+- Wąż faktycznie rośnie o 1 po zjedzeniu jabłka (nie kasujemy ogona w tym ruchu).
+- Po restarcie gracze nie znikają: serwer pamięta ich ID i ponownie ich dodaje.
 
 Użytkownik RabbitMQ: adminowiec
 Hasło RabbitMQ: .p=o!v0cD5kK2+F3,{c1&DB
@@ -26,7 +24,7 @@ MAX_PLAYERS = 6        # maksymalna liczba graczy
 
 # ----- Pomocnicze stałe -----
 WALL = '#'
-APPLE = 'O'
+APPLE = 'O'    # Upewnij się, że w mapach wpisane jest duże "O" (litera), a nie zero '0'
 EMPTY = '.'
 
 # Kierunki ruchu (vim-style)
@@ -65,6 +63,7 @@ class SnakeGame:
     def load_maps(self, folder):
         """
         Wczytuje pliki tekstowe z katalogu `folder` (np. room0.txt, room1.txt).
+        Zakładamy, że w mapach znak 'O' to jabłko, '#' to ściana, '.' to puste pole.
         """
         if not os.path.isdir(folder):
             print(f"[ERROR] Katalog maps '{folder}' nie istnieje.")
@@ -82,11 +81,11 @@ class SnakeGame:
     def generate_start_positions(self):
         """
         Generuje listę pozycji startowych w samym środku w linii poziomej.
-        Np. dla 6 graczy: [ (row, midX-2), (row, midX-1), (row, midX), (row, midX+1), ... ]
+        Np. dla 6 graczy: [ (room0, row, midX-2), ... ] itp.
         """
         center_row = self.height // 2
         center_col = self.width // 2
-        offset_list = [-2, -1, 0, 1, 2, 3]  # tyle, ile MAX_PLAYERS
+        offset_list = [-2, -1, 0, 1, 2, 3]  # starczy dla 6 graczy
         positions = []
         for offset in offset_list:
             y = center_row
@@ -112,6 +111,7 @@ class SnakeGame:
                 sy = self.height // 2
                 sx = self.width // 2
 
+            # Sprawdź, czy faktycznie wolne
             if not self.is_empty_cell(room, sy, sx):
                 # jeśli jednak kolizja, poszukaj wolnego pola
                 found = False
@@ -249,9 +249,9 @@ class SnakeGame:
 
                 # Sprawdź, czy zjadł jabłko
                 if room_map[new_y][new_x] == APPLE:
+                    # Wąż rośnie: NIE usuwamy ogona w tym ruchu
                     room_map[new_y][new_x] = EMPTY
-                    print(f"[INFO] Gracz {pid} zjadł jabłko => wąż się wydłuża")
-                    # w tym miejscu ogon NIE jest usuwany => wąż rośnie
+                    print(f"[INFO] Gracz {pid} zjadł jabłko => wąż rośnie!")
                     self.spawn_random_apple(pdata["room"])
                 else:
                     # Normalny ruch => usuń ogon
@@ -347,14 +347,19 @@ class SnakeGame:
 class SnakeServer:
     """
     Serwer, który utrzymuje stan gry i komunikuje się z klientami przez RabbitMQ.
-    Dodano obsługę "restart_game" -> tworzy nowy obiekt SnakeGame.
+    - Wąż rośnie po zjedzeniu jabłka.
+    - Restart gry klawiszem 'r': serwer tworzy nowy obiekt SnakeGame.
+      Ale tym razem pamiętamy, którzy gracze dołączyli (connected_players),
+      i automatycznie ich ponownie dodajemy do nowego SnakeGame().
     """
 
     def __init__(self):
-        self.game = SnakeGame()  # Główna logika gry
+        # Pamiętamy, którzy gracze dołączyli
+        self.connected_players = set()
+
+        self.game = SnakeGame()
         self.running = True
 
-        # Połączenie i kanał do konsumowania
         try:
             self.consume_connection = pika.BlockingConnection(
                 pika.ConnectionParameters(
@@ -377,7 +382,6 @@ class SnakeServer:
             print(f"[ERROR] Nie udało się połączyć z RabbitMQ do konsumowania: {e}")
             self.running = False
 
-        # Połączenie i kanał do publikowania
         try:
             self.publish_connection = pika.BlockingConnection(
                 pika.ConnectionParameters(
@@ -395,7 +399,6 @@ class SnakeServer:
             print(f"[ERROR] Nie udało się połączyć z RabbitMQ do publikowania: {e}")
             self.running = False
 
-        # Uruchamiamy wątek update
         if self.running:
             self.update_thread = threading.Thread(target=self.game_loop, daemon=True)
             self.update_thread.start()
@@ -403,11 +406,10 @@ class SnakeServer:
 
     def on_request(self, ch, method, props, body):
         """
-        Callback obsługujący wiadomości od klientów.
-        Obsługuje:
-          - join_game (dołączenie do gry)
-          - player_move (ruch gracza)
-          - restart_game (reset stanu gry)
+        Callback obsługujący wiadomości od klientów:
+        - "join_game"
+        - "player_move"
+        - "restart_game"
         """
         try:
             message = json.loads(body.decode("utf-8"))
@@ -419,6 +421,7 @@ class SnakeServer:
         if msg_type == "join_game":
             player_id = str(message.get("player_id"))
             if player_id:
+                self.connected_players.add(player_id)  # zapamiętaj, że taki gracz dołączył
                 success = self.game.add_player(player_id)
                 if success:
                     print(f"[SERVER] Gracz {player_id} dołączył do gry.")
@@ -429,23 +432,27 @@ class SnakeServer:
             direction = message.get("direction")
             if player_id and direction:
                 self.game.update_player_direction(player_id, direction)
-                print(f"[SERVER] Gracz {player_id} -> '{direction}'")
+                # ewentualnie log
         elif msg_type == "restart_game":
             # Dowolny gracz może zrestartować
             print("[SERVER] Otrzymano żądanie restartu gry!")
-            self.game = SnakeGame()  # tworzony nowy obiekt logiki
-            print("[SERVER] Gra zrestartowana.")
+            # Tworzymy nową instancję SnakeGame
+            self.game = SnakeGame()
+            # Automatycznie dodajemy z powrotem wszystkich connected_players
+            for pid in self.connected_players:
+                self.game.add_player(pid)
+            print("[SERVER] Gra zrestartowana, gracze ponownie dodani.")
         else:
             print(f"[WARN] Nieznany typ wiadomości: {msg_type}")
 
     def game_loop(self):
         """
-        Wątek aktualizacji gry i publikowania stanu.
+        Wątek aktualizujący grę i publikujący stan do klientów co UPDATE_INTERVAL.
         """
         while self.running:
             self.game.update()
             state = self.game.get_game_state()
-            # publikacja stanu
+            # publikacja stanu do wymiany fanout
             try:
                 self.publish_channel.basic_publish(
                     exchange=self.game_state_exchange,
@@ -481,7 +488,6 @@ class SnakeServer:
                 self.consume_connection.close()
             except:
                 pass
-
             try:
                 self.publish_connection.close()
             except:
