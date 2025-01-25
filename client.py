@@ -34,17 +34,20 @@ KEY_TO_DIRECTION = {
 
 
 class SnakeClient:
-    def __init__(self, player_id):
+    def __init__(self, player_id, rabbitmq_host, rabbitmq_user, rabbitmq_password):
         self.player_id = str(player_id)
         self.running = True
         self.game_state = {}  # ostatnio odebrany stan gry
 
-        # ------------------------------
-        # Połączenie do PUBLIKOWANIA (wysyłanie do serwera)
-        # ------------------------------
+        # ------ Połączenie do PUBLIKOWANIA (wysyłanie do serwera) ------
         try:
             self.publish_connection = pika.BlockingConnection(
-                pika.ConnectionParameters(host='localhost')
+                pika.ConnectionParameters(
+                    host=rabbitmq_host,
+                    port=5672,
+                    virtual_host='/',
+                    credentials=pika.PlainCredentials(rabbitmq_user, rabbitmq_password)
+                )
             )
             self.publish_channel = self.publish_connection.channel()
             self.server_queue = "server_queue"
@@ -54,12 +57,15 @@ class SnakeClient:
             self.running = False
             return
 
-        # ------------------------------
-        # Połączenie do KONSUMOWANIA (odbiór stanu gry z fanout)
-        # ------------------------------
+        # ------ Połączenie do KONSUMOWANIA (odbieranie stanu gry) ------
         try:
             self.consume_connection = pika.BlockingConnection(
-                pika.ConnectionParameters(host='localhost')
+                pika.ConnectionParameters(
+                    host=rabbitmq_host,
+                    port=5672,
+                    virtual_host='/',
+                    credentials=pika.PlainCredentials(rabbitmq_user, rabbitmq_password)
+                )
             )
             self.consume_channel = self.consume_connection.channel()
 
@@ -111,7 +117,7 @@ class SnakeClient:
             "direction": direction
         }
         self.send_to_server(message)
-        print(f"[CLIENT] Wysłano ruch {direction} dla gracza {self.player_id}.")
+        print(f"[CLIENT] Wysłano ruch '{direction}' dla gracza {self.player_id}.")
 
     def send_to_server(self, data_dict):
         """
@@ -185,6 +191,11 @@ class SnakeClient:
                 stdscr.refresh()
                 time.sleep(0.1)
             except KeyboardInterrupt:
+                self.running = False
+                break
+            except Exception as e:
+                print(f"[ERROR] Błąd w pętli curses: {e}")
+                self.running = False
                 break
 
         self.close()
@@ -237,24 +248,26 @@ class SnakeClient:
         Zamyka klienta: kończy pętlę, zatrzymuje wątek i zamyka połączenia z RabbitMQ.
         """
         self.running = False
-        # Zatrzymaj start_consuming
+        # Zatrzymaj konsumpcję
         try:
             self.consume_channel.stop_consuming()
-        except:
-            pass
-
-        if self.listen_thread.is_alive():
-            self.listen_thread.join()
+        except Exception as e:
+            print(f"[ERROR] Błąd podczas zatrzymywania konsumpcji: {e}")
 
         # Zamknij połączenia
         try:
-            self.publish_connection.close()
-        except:
-            pass
+            if hasattr(self, 'publish_connection') and self.publish_connection.is_open:
+                self.publish_connection.close()
+                print("[CLIENT] Zamknięto połączenie publish.")
+        except Exception as e:
+            print(f"[ERROR] Błąd podczas zamykania publish_connection: {e}")
+
         try:
-            self.consume_connection.close()
-        except:
-            pass
+            if hasattr(self, 'consume_connection') and self.consume_connection.is_open:
+                self.consume_connection.close()
+                print("[CLIENT] Zamknięto połączenie consume.")
+        except Exception as e:
+            print(f"[ERROR] Błąd podczas zamykania consume_connection: {e}")
 
         print(f"[CLIENT] Zamknięto klienta (player_id={self.player_id}).")
 
@@ -264,7 +277,12 @@ def main():
     parser.add_argument("--player_id", type=int, required=True, help="Identyfikator gracza (np. 1)")
     args = parser.parse_args()
 
-    client = SnakeClient(args.player_id)
+    # Dane do połączenia z RabbitMQ
+    rabbitmq_host = "20.82.1.111"        # Adres IP serwera RabbitMQ
+    rabbitmq_user = "adminowiec"        # Użytkownik RabbitMQ
+    rabbitmq_password = ".p=o!v0cD5kK2+F3,{c1&DB"      # Hasło RabbitMQ
+
+    client = SnakeClient(args.player_id, rabbitmq_host, rabbitmq_user, rabbitmq_password)
     if client.running:
         try:
             client.run_curses()
