@@ -2,16 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-Klient gry Snake wieloosobowej:
-- Wyświetla listę aktualnych graczy.
-- Można dołączyć w dowolnym momencie.
-- Sterowanie: h, j, k, l, q (vim-style).
-- Wyświetla mapę, węże i jabłka, oraz listę graczy w dolnych liniach.
+Klient gry Snake wieloosobowej.
+Zmiany:
+- Klawisz 'r' wysyła żądanie restartu gry (dowolny gracz może to zrobić).
+- Węże rosną po zjedzeniu jabłka (obsługiwane po stronie serwera).
+- Listy graczy i stanu analogicznie do poprzedniej wersji.
 
-Upewnij się, że biblioteka 'pika' jest zainstalowana,
-a także 'windows-curses' na Windows, jeśli używasz curses.
-
-Użytkownik: adminowiec, hasło: .p=o!v0cD5kK2+F3,{c1&DB, host: [IP], port: 5672
+Autor: ChatGPT
 """
 
 import argparse
@@ -35,7 +32,7 @@ class SnakeClient:
         self.running = True
         self.game_state = {}
 
-        # Połączenie do publikowania (wysyłanie ruchów)
+        # Połączenie do publish
         try:
             self.publish_connection = pika.BlockingConnection(
                 pika.ConnectionParameters(
@@ -53,7 +50,7 @@ class SnakeClient:
             self.running = False
             return
 
-        # Połączenie do konsumowania (odbieranie stanu gry)
+        # Połączenie do consume
         try:
             self.consume_connection = pika.BlockingConnection(
                 pika.ConnectionParameters(
@@ -66,7 +63,10 @@ class SnakeClient:
             self.consume_channel = self.consume_connection.channel()
 
             self.game_state_exchange = "game_state_exchange"
-            self.consume_channel.exchange_declare(exchange=self.game_state_exchange, exchange_type='fanout')
+            self.consume_channel.exchange_declare(
+                exchange=self.game_state_exchange,
+                exchange_type='fanout'
+            )
 
             result = self.consume_channel.queue_declare(queue='', exclusive=True)
             self.client_queue = result.method.queue
@@ -80,7 +80,7 @@ class SnakeClient:
             self.running = False
             return
 
-        # Wątek odbierający stan gry
+        # Wątek odbioru
         self.listen_thread = threading.Thread(target=self.listen_game_state, daemon=True)
         self.listen_thread.start()
 
@@ -102,7 +102,17 @@ class SnakeClient:
             "direction": direction
         }
         self.send_to_server(msg)
-        print(f"[CLIENT] Wysłano ruch '{direction}' dla gracza {self.player_id}.")
+
+    def send_restart(self):
+        """
+        Wysyła żądanie restartu gry do serwera.
+        """
+        msg = {
+            "type": "restart_game",
+            "player_id": self.player_id
+        }
+        self.send_to_server(msg)
+        print("[CLIENT] Wysłano żądanie restartu gry.")
 
     def send_to_server(self, msg_dict):
         if not self.running:
@@ -153,6 +163,9 @@ class SnakeClient:
                 if key == ord('q'):
                     self.running = False
                     break
+                elif key == ord('r'):
+                    # Restart gry
+                    self.send_restart()
                 elif key in KEY_TO_DIRECTION:
                     self.send_move(KEY_TO_DIRECTION[key])
 
@@ -168,17 +181,13 @@ class SnakeClient:
         self.close()
 
     def draw_game(self, stdscr):
-        """
-        Rysuje mapę, węże, jabłka, listę graczy.
-        """
-        state = self.game_state
-        if not state:
+        if not self.game_state:
             stdscr.addstr(0, 0, "Oczekiwanie na dane z serwera...")
             return
 
-        current_room = state.get("current_room", "room0")
-        maps = state.get("maps", {})
-        players = state.get("players", {})
+        current_room = self.game_state.get("current_room", "room0")
+        maps = self.game_state.get("maps", {})
+        players = self.game_state.get("players", {})
 
         room_map = maps.get(current_room, [])
         for y, row in enumerate(room_map):
@@ -187,13 +196,12 @@ class SnakeClient:
             except curses.error:
                 pass
 
-        # Rysujemy węże (tylko te w aktualnym pokoju)
+        # Rysujemy węże
         for pid, pdata in players.items():
             if not pdata["alive"]:
                 continue
             if pdata["room"] != current_room:
                 continue
-
             for i, (py, px) in enumerate(pdata["positions"]):
                 c = '@' if i == 0 else 's'
                 try:
@@ -201,18 +209,15 @@ class SnakeClient:
                 except curses.error:
                     pass
 
-        # Wyświetlamy info pod mapą
         info_y = len(room_map) + 1
         try:
             stdscr.addstr(info_y, 0, f"Pokój: {current_room}")
-            stdscr.addstr(info_y + 1, 0, "Sterowanie: h, j, k, l | q=wyjście")
+            stdscr.addstr(info_y + 1, 0, "Sterowanie: h/j/k/l, r=restart, q=wyjście")
 
-            # Lista graczy (wysokość = info_y+3)
-            alive_players = []
-            for pid, pdata in players.items():
-                alive_players.append(pid)
+            # Lista graczy
+            alive_pids = list(players.keys())
+            stdscr.addstr(info_y + 2, 0, f"Aktualni gracze: {', '.join(alive_pids)}")
 
-            stdscr.addstr(info_y + 2, 0, f"Aktualni gracze: {', '.join(alive_players)}")
             if self.player_id in players:
                 pinfo = players[self.player_id]
                 alive_str = "Alive" if pinfo["alive"] else "Dead"
