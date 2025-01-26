@@ -6,7 +6,7 @@ Sterowanie za pomocą nawigacji znanej z VIM.
 Możemy zrestartować grę za pomocą klawisza "R".
 Możemy wyłączyć sesję za pomocą klawisza "Q"
 
-Strona serwerowa (RabbitMQ + plik server.py oraz mapy) jest hostowana na serwerze z publicznym adresem IP, dzięki czemu do zagrania wystarczy uruchomić samą client.py.
+Strona serwerowa (RabbitMQ + plik server.py oraz mapy) jest hostowana na serwerze z publicznym adresem IP, dzięki czemu do zagrania wystarczy uruchomić sam client.py.
 
 
 ## Uruchomienie gry
