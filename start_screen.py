@@ -5,17 +5,22 @@ import curses
 
 def show_start_screen(stdscr):
     """
-    Wyświetla menu główne (retro TUI) z obsługą VIM:
+    Wyświetla menu główne (retro TUI) z obsługą stylu VIM:
       - k: poprzednia opcja
       - j: następna opcja
       - ENTER: zatwierdź
-      - q: wyjdź (opcja 3)
+      - q: wyjście
 
-    Zwraca 1, 2 lub 3 w zależności od wybranej opcji.
+    Zwraca:
+      1 = Rozpocznij grę multiplayer
+      2 = Opis gry
+      3 = Wyjdź z gry
     """
     curses.curs_set(0)
     stdscr.nodelay(False)
-    stdscr.keypad(False)  # wyłączamy strzałki, styl VIM
+
+    # Wyłącz obługę klawiszy strzałek
+    stdscr.keypad(False)
 
     options = [
         "Rozpocznij grę multiplayer",
@@ -24,37 +29,29 @@ def show_start_screen(stdscr):
     ]
     selected_idx = 0
 
-    
-
     banner = [
-            
-        "  ___  ___      _ _   _   _____                  _    ",
-        "  |  \/  |     | | | (_) /  ___|                | |    ",
-        "  | .  . |_   _| | |_ _  \ `--. _ __   ___ _   _| | __ ",
-        "  | |\/| | | | | | __| |  `--. \ '_ \ / _ \ | | | |/ / ",
-        "  | |  | | |_| | | |_| | /\__/ / | | |  __/ |_| |   <  ",
-        "  \_|  |_/\__,_|_|\__|_| \____/|_| |_|\___|\__, |_|\_\ ",
-        "                                            __/ |      ",
-        "                                           |___/       "
-            ]
+        "  __  __  __  __  _____ ___   ___   _  _ ",
+        " |  \\/  |/ _||  \\/  | __/ _ \\ / _ \\ | || |",
+        " | |\\/| |\\_ \\| |\\/| | _| (_) | (_) || || |",
+        " |_|  |_|/__/|_|  |_|___\\___/ \\___(_)_||_|",
+        "                                        ",
+        "            MULTI     SNEYK              "
+    ]
 
     while True:
         stdscr.clear()
 
-        # Rysowanie banera (duży napis "MULTI SNEYK")
         start_y = 1
         for i, line in enumerate(banner):
             x = max(0, (curses.COLS // 2) - len(line) // 2)
             stdscr.addstr(start_y + i, x, line, curses.A_BOLD)
 
-        # Autorzy gry na dole
         authors_text = "Autorzy gry: Autor1, Autor2, Autor3"
         stdscr.addstr(curses.LINES - 2, 
                       max(0, (curses.COLS // 2) - len(authors_text) // 2),
                       authors_text, 
                       curses.A_DIM)
 
-        # Rysowanie opcji menu
         menu_start_y = start_y + len(banner) + 2
         for i, opt in enumerate(options):
             x = (curses.COLS // 2) - 15
@@ -78,31 +75,28 @@ def show_start_screen(stdscr):
         elif key in [10, 13]:  # ENTER
             return selected_idx + 1
         elif key == ord('q'):
-            # wyjście - traktuj jak 3. opcję (Wyjdź z gry)
             return 3
 
 
 def show_description(stdscr):
     """
     Ekran opisu gry (klawisze ENTER lub q -> powrót).
-    Wyświetla ASCII "lore" w POGRUBIONEJ czcionce, plus przykładową fabułę.
+    Wyświetla ASCII "lore" w pogrubieniu, plus przykładową fabułę.
     """
     curses.curs_set(0)
     stdscr.nodelay(False)
 
-    # ASCII "lore" w stylu figlet
     ascii_lore = [
         " _     ___________ _____ ",
         "| |   |  _  | ___ \\  ___|",
         "| |   | | | | |_/ / |__  ",
         "| |   | | | |    /|  __| ",
         "| |___\\ \\_/ / |\\ \\| |___ ",
-        "\\_____/\___/\_| \\_\\____/ ",
+        "\\_____/\___/\\_| \\_\\____/ ",
         "                         ",
         "                         "
     ]
 
-    # Przykładowe linie opisu / fabuły
     lines = [
         "Witaj w krainie Multi Sneyk!",
         "Jako dzielny wąż przemierzasz mroczne komnaty,",
@@ -119,14 +113,14 @@ def show_description(stdscr):
     while True:
         stdscr.clear()
 
-        # Rysujemy ASCII "lore" w POGRUBIENIU
         row = 1
         col = 2
+        # ASCII "lore" - pogrubione
         for line in ascii_lore:
             stdscr.addstr(row, col, line, curses.A_BOLD)
             row += 1
 
-        row += 1  # odstęp
+        row += 1
         for line in lines:
             stdscr.addstr(row, col, line)
             row += 1
