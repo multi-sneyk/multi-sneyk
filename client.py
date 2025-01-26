@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 import argparse
 import json
@@ -7,6 +8,7 @@ import time
 import curses
 import pika
 
+# Zamiana klawiszy -> kierunki
 KEY_TO_DIRECTION = {
     ord('h'): 'h',
     ord('j'): 'j',
@@ -14,6 +16,7 @@ KEY_TO_DIRECTION = {
     ord('l'): 'l'
 }
 
+# Kierunek -> znak głowy
 DIR_TO_HEAD = {
     'k': '^',
     'j': 'v',
@@ -31,7 +34,21 @@ class SnakeClient:
         self.running = True
         self.game_state = {}
 
-        # Połączenie do publish
+        # Tryby ekranu: "start", "description", "game", "exit"
+        self.screen_mode = "start"
+
+        # Zmienna, by wiedzieć, czy już połączyliśmy się z RabbitMQ
+        self.rabbit_connected = False
+
+    # ---------------------
+    # Funkcje RabbitMQ
+    # ---------------------
+
+    def connect_rabbit(self):
+        """Łączy się z RabbitMQ (2 połączenia: publish + consume)."""
+        if self.rabbit_connected:
+            return
+
         try:
             self.publish_conn = pika.BlockingConnection(
                 pika.ConnectionParameters(
@@ -41,13 +58,12 @@ class SnakeClient:
             )
             self.publish_ch = self.publish_conn.channel()
             self.server_queue = "server_queue"
-            print("[CLIENT] publish connect OK.")
+            print("[CLIENT] Publish connect OK.")
         except pika.exceptions.AMQPConnectionError as e:
             print(f"[ERROR] Publish connect fail: {e}")
-            self.running=False
+            self.running = False
             return
 
-        # Połączenie do consume
         try:
             self.consume_conn = pika.BlockingConnection(
                 pika.ConnectionParameters(
@@ -56,61 +72,23 @@ class SnakeClient:
                 )
             )
             self.consume_ch = self.consume_conn.channel()
-
             self.game_state_exchange = "game_state_exchange"
             self.consume_ch.exchange_declare(exchange=self.game_state_exchange, exchange_type='fanout')
 
             res = self.consume_ch.queue_declare(queue='', exclusive=True)
             self.client_queue = res.method.queue
             self.consume_ch.queue_bind(exchange=self.game_state_exchange, queue=self.client_queue)
-
-            print("[CLIENT] consume connect OK.")
+            print("[CLIENT] Consume connect OK.")
         except pika.exceptions.AMQPConnectionError as e:
-            print(f"[ERROR] consume connect fail: {e}")
-            self.running=False
+            print(f"[ERROR] Consume connect fail: {e}")
+            self.running = False
             return
 
+        # Wątek nasłuchu
         self.listen_thread = threading.Thread(target=self.listen_loop, daemon=True)
         self.listen_thread.start()
 
-        # Wyślij join_game
-        self.join_game()
-
-    def join_game(self):
-        msg = {
-            "type": "join_game",
-            "player_id": self.player_id
-        }
-        self.send_to_server(msg)
-        print(f"[CLIENT] Wysłano join_game pid={self.player_id}")
-
-    def send_to_server(self, data):
-        if not self.running:
-            return
-        try:
-            self.publish_ch.basic_publish(
-                exchange='',
-                routing_key=self.server_queue,
-                body=json.dumps(data)
-            )
-        except pika.exceptions.AMQPError as e:
-            print(f"[ERROR] publish msg: {e}")
-
-    def send_move(self, direction):
-        msg = {
-            "type": "player_move",
-            "player_id": self.player_id,
-            "direction": direction
-        }
-        self.send_to_server(msg)
-
-    def send_restart(self):
-        msg = {
-            "type":"restart_game",
-            "player_id": self.player_id
-        }
-        self.send_to_server(msg)
-        print("[CLIENT] global restart -> map0")
+        self.rabbit_connected = True
 
     def listen_loop(self):
         def callback(ch, method, props, body):
@@ -119,6 +97,7 @@ class SnakeClient:
                 self.game_state = st
             except:
                 pass
+
         self.consume_ch.basic_consume(
             queue=self.client_queue,
             on_message_callback=callback,
@@ -130,44 +109,185 @@ class SnakeClient:
             pass
         self.running=False
 
-    def run_curses(self):
-        curses.wrapper(self.curses_loop)
+    def send_to_server(self, data):
+        if not self.rabbit_connected:
+            return
+        try:
+            self.publish_ch.basic_publish(
+                exchange='',
+                routing_key=self.server_queue,
+                body=json.dumps(data)
+            )
+        except:
+            pass
 
-    def curses_loop(self, stdscr):
+    def join_game(self):
+        msg = {
+            "type":"join_game",
+            "player_id": self.player_id
+        }
+        self.send_to_server(msg)
+        print(f"[CLIENT] Wysłano join_game (pid={self.player_id}).")
+
+    def send_move(self, direction):
+        msg = {
+            "type":"player_move",
+            "player_id": self.player_id,
+            "direction": direction
+        }
+        self.send_to_server(msg)
+
+    def send_restart(self):
+        msg = {
+            "type":"restart_game",
+            "player_id": self.player_id
+        }
+        self.send_to_server(msg)
+        print("[CLIENT] Globalny restart => map0")
+
+    # ---------------------
+    # Pętla curses
+    # ---------------------
+
+    def run_curses(self):
+        curses.wrapper(self.main_curses_loop)
+
+    def main_curses_loop(self, stdscr):
         curses.curs_set(0)
         stdscr.nodelay(True)
 
         while self.running:
             try:
                 key = stdscr.getch()
-                if key == ord('q'):
-                    self.running=False
+                if self.screen_mode == "start":
+                    self.handle_start_screen(stdscr, key)
+                elif self.screen_mode == "description":
+                    self.handle_description_screen(stdscr, key)
+                elif self.screen_mode == "game":
+                    self.handle_game_screen(stdscr, key)
+                elif self.screen_mode == "exit":
+                    self.running = False
                     break
-                elif key == ord('r'):
-                    self.send_restart()
-                elif key in KEY_TO_DIRECTION:
-                    self.send_move(KEY_TO_DIRECTION[key])
 
-                stdscr.clear()
-                self.draw_game(stdscr)
                 stdscr.refresh()
-
                 time.sleep(0.1)
             except KeyboardInterrupt:
                 self.running=False
                 break
             except curses.error:
-                # Ignorujemy ewentualne błędy curses
+                # Ignorujemy ewentualne błędy curses (jeśli wychodzi poza ekran)
                 pass
 
         self.close()
 
-    def draw_game(self, stdscr):
-        # Bezpieczne rysowanie: zawsze w 'try: ... except curses.error: pass'
+    # ---------------------
+    # 1. Ekran Startowy
+    # ---------------------
+    def handle_start_screen(self, stdscr, key):
+        stdscr.clear()
+
+        # ASCII Art z zadania:
+        ascii_logo = [
+        r" ___  ___      _ _   _   _____                  _    ",
+        r"|  \/  |     | | | (_) /  ___|                | |   ",
+        r"| .  . |_   _| | |_ _  \ `--. _ __   ___ _   _| | __",
+        r"| |\/| | | | | | __| |  `--. \ '_ \ / _ \ | | | |/ /",
+        r"| |  | | |_| | | |_| | /\__/ / | | |  __/ |_| |   < ",
+        r"\_|  |_/\__,_|_|\__|_| \____/|_| |_|\___|\__, |_|\_\\"
+        ]
+        row = 0
+        for line in ascii_logo:
+            try:
+                stdscr.addstr(row, 2, line)
+            except curses.error:
+                pass
+            row+=1
+
+        row+=1
+        # Menu
+        try:
+            stdscr.addstr(row, 4, "1) Rozpocznij gre")
+            stdscr.addstr(row+2, 4, "2) Opis Gry")
+            stdscr.addstr(row+4, 4, "3) Wyjdz")
+        except curses.error:
+            pass
+
+        # Autorzy
+        maxy, maxx = stdscr.getmaxyx()
+        authors = "Autor1, Autor2, Autor3"
+        try:
+            stdscr.addstr(maxy-1, 2, authors)
+        except curses.error:
+            pass
+
+        # Obsługa klawiszy
+        if key == ord('1'):
+            # Rozpocznij grę
+            self.connect_rabbit()
+            if self.rabbit_connected:
+                self.join_game()
+                self.screen_mode = "game"
+        elif key == ord('2'):
+            # opis
+            self.screen_mode = "description"
+        elif key == ord('3'):
+            # exit
+            self.screen_mode = "exit"
+
+    # ---------------------
+    # 2. Ekran Opisu
+    # ---------------------
+    def handle_description_screen(self, stdscr, key):
+        stdscr.clear()
+        description_lines = [
+            "Opis gry Multi-Sneyk:",
+            "",
+            "To niezwykle wciagająca gra w stylu retro,",
+            "w której sterujesz wężem, zbierasz jabłka",
+            "i unikasz kolizji. Dodatkowo musisz rywalizować",
+            "z innymi graczami w czasie rzeczywistym!",
+            "",
+            "Sterowanie w stylu VIM: h/j/k/l. Zbierz 5 jabłek",
+            "na każdej z 4 map, aby zostać mistrzem!",
+        ]
+        row=2
+        for line in description_lines:
+            try:
+                stdscr.addstr(row, 2, line)
+            except curses.error:
+                pass
+            row+=1
+
+        try:
+            stdscr.addstr(row+2, 2, "Wcisnij 'w' aby wrocic do menu startowego.")
+        except curses.error:
+            pass
+
+        if key in [ord('w'), ord('W')]:
+            self.screen_mode = "start"
+
+    # ---------------------
+    # 3. Ekran Gry
+    # ---------------------
+    def handle_game_screen(self, stdscr, key):
+        if not self.rabbit_connected:
+            # wracamy do start
+            self.screen_mode = "start"
+            return
+
+        if key == ord('q'):
+            self.screen_mode="exit"
+            return
+        elif key == ord('r'):
+            self.send_restart()
+        elif key in KEY_TO_DIRECTION:
+            self.send_move(KEY_TO_DIRECTION[key])
+
+        # Rysujemy stan gry:
         st = self.game_state
         if not st:
             try:
-                stdscr.addstr(0,0,"Oczekiwanie na dane z serwera...")
+                stdscr.addstr(0,0,"Oczekiwanie na stan gry...")
             except curses.error:
                 pass
             return
@@ -175,7 +295,6 @@ class SnakeClient:
         gameOver = st.get("gameOver",False)
         winner = st.get("winner",None)
         if gameOver and winner:
-            # Koniec
             if winner==self.player_id:
                 msg = "Gratulacje, jestes mistrzem sterowania VIMem"
             else:
@@ -191,7 +310,6 @@ class SnakeClient:
         players = st.get("players",{})
 
         room_map = maps.get(current_room,[])
-        # Rysujemy mapę - w pętli
         for y, rowstr in enumerate(room_map):
             try:
                 stdscr.addstr(y,0,rowstr)
@@ -199,86 +317,92 @@ class SnakeClient:
                 pass
 
         # Rysujemy węże
-        for pid,pdata in players.items():
+        for pid, pdata in players.items():
             if not pdata["alive"]:
                 continue
-            if pdata["room"] != current_room:
+            if pdata["room"]!=current_room:
                 continue
-            positions = pdata["positions"]
-            lDir = pdata.get("lastDir",None)
-            for i,(py,px) in enumerate(positions):
+            poss = pdata["positions"]
+            lastDir = pdata.get("lastDir",None)
+            for i,(py,px) in enumerate(poss):
                 if i==0:
-                    # głowa
-                    if lDir in DIR_TO_HEAD:
-                        c=DIR_TO_HEAD[lDir]
+                    if lastDir in DIR_TO_HEAD:
+                        c=DIR_TO_HEAD[lastDir]
                     else:
                         c='@'
                 else:
                     c='s'
                 try:
-                    stdscr.addch(py, px, c)
+                    stdscr.addch(py,px,c)
                 except curses.error:
                     pass
 
-        # Wiadomości o sterowaniu etc.
         info_y = len(room_map)+1
         try:
-            stdscr.addstr(info_y,0,"Sterowanie: h/j/k/l, r=restart, q=wyjście")
+            stdscr.addstr(info_y,0,"Sterowanie: h/j/k/l, r=restart, q=wyjscie")
         except curses.error:
             pass
 
-        # Ranking: sortujemy wg apples malejąco
+        # Ranking wg apples
         ranking = sorted(players.items(), key=lambda kv: kv[1].get("apples",0), reverse=True)
         offset=2
         for (rpid,rdata) in ranking:
             alive_str = "Alive" if rdata["alive"] else "Dead"
-            apples = rdata.get("apples",0)
-            txt = f"Gracz {rpid}: apples={apples}, {alive_str}"
+            app = rdata.get("apples",0)
+            line = f"Gracz {rpid}: apples={app}, {alive_str}"
             try:
-                stdscr.addstr(info_y+offset, 0, txt)
+                stdscr.addstr(info_y+offset,0,line)
             except curses.error:
                 pass
             offset+=1
 
+    # ---------------------
+
     def close(self):
         self.running=False
-        try:
-            self.consume_ch.stop_consuming()
-        except:
-            pass
+        # Zatrzymaj nasłuch
+        if hasattr(self,'consume_ch'):
+            try:
+                self.consume_ch.stop_consuming()
+            except:
+                pass
         if hasattr(self,'listen_thread') and self.listen_thread.is_alive():
             self.listen_thread.join()
+        # Zamknij połączenia
+        if hasattr(self,'publish_conn'):
+            try:
+                self.publish_conn.close()
+            except:
+                pass
+        if hasattr(self,'consume_conn'):
+            try:
+                self.consume_conn.close()
+            except:
+                pass
 
-        try:
-            self.publish_conn.close()
-        except:
-            pass
-        try:
-            self.consume_conn.close()
-        except:
-            pass
-        print(f"[CLIENT] Zakończono działanie (pid={self.player_id}).")
+        print(f"[CLIENT] Zakonczenie. (pid={self.player_id})")
 
 
 def main():
-    parser = argparse.ArgumentParser("Klient Multi-Sneyk - minimalny ignoring curses errors")
+    parser = argparse.ArgumentParser(description="Klient Multi Sneyk z ekranem startowym")
     parser.add_argument("--player_id", type=int, default=1)
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--user", default="adminowiec")
-    parser.add_argument("--password", default=".p=o!v0cD5kK2+F3,{c1&DB")
+    parser.add_argument("--password", default="Start123!")
     args = parser.parse_args()
 
-    cl = SnakeClient(args.player_id, args.host, args.user, args.password)
-    if cl.running:
+    client = SnakeClient(args.player_id, args.host, args.user, args.password)
+    if client.running:
         try:
-            cl.run_curses()
+            client.run_curses()
         except Exception as e:
             print(f"[ERROR] curses: {e}")
         finally:
-            cl.close()
+            client.close()
     else:
         print("[CLIENT] Nie wystartował poprawnie.")
 
 
 if __name__=="__main__":
     main()
+
