@@ -4,12 +4,9 @@
 import argparse
 import json
 import threading
-import time
 import curses
 import pika
 import sys
-
-# Import ekranu startowego z osobnego pliku
 from start_screen import show_start_screen, show_description
 
 WALL = '#'
@@ -30,16 +27,18 @@ KEY_TO_DIRECTION = {
 }
 
 class SnakeClient:
-    def __init__(self, player_id, host="localhost", user="adminowiec", password="Start123!"):
+    def __init__(self, player_id, host="localhost", user="adminowiec", password=".p=o!v0cD5kK2+F3,{c1&DB"):
         self.player_id = str(player_id)
         self.running = True
         self.game_state = {}
 
-        # Inicjalizacja (połączenia) – tak jak poprzednio
+        # Połączenie -> publikowanie
         try:
             self.pub_conn = pika.BlockingConnection(
                 pika.ConnectionParameters(
-                    host=host, port=5672, virtual_host='/',
+                    host=host,
+                    port=5672,
+                    virtual_host='/',
                     credentials=pika.PlainCredentials(user, password)
                 )
             )
@@ -51,10 +50,13 @@ class SnakeClient:
             self.running = False
             return
 
+        # Połączenie -> konsumowanie
         try:
             self.con_conn = pika.BlockingConnection(
                 pika.ConnectionParameters(
-                    host=host, port=5672, virtual_host='/',
+                    host=host,
+                    port=5672,
+                    virtual_host='/',
                     credentials=pika.PlainCredentials(user, password)
                 )
             )
@@ -64,8 +66,10 @@ class SnakeClient:
 
             result = self.con_ch.queue_declare(queue='', exclusive=True)
             self.client_queue = result.method.queue
-            self.con_ch.queue_bind(exchange=self.game_state_exchange, queue=self.client_queue)
-
+            self.con_ch.queue_bind(
+                exchange=self.game_state_exchange,
+                queue=self.client_queue
+            )
             print("[CLIENT] Połączenie consume OK.")
         except pika.exceptions.AMQPConnectionError as e:
             print(f"[ERROR] consume connect fail: {e}")
@@ -119,48 +123,44 @@ class SnakeClient:
 
     def curses_loop(self, stdscr):
         curses.curs_set(0)
-        stdscr.nodelay(True)
+        # UWAGA: nodelay(False) -> czekamy na klawisz
+        stdscr.nodelay(False)
 
-        # Kolory
+        # Inicjalizacja kolorów
         curses.start_color()
         curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # wąż
-        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # ściany (#)
-        curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLACK)  # kropki ('.')
-        curses.init_pair(4, curses.COLOR_YELLOW, curses.COLOR_BLACK) # jabłka ('O')
+        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # ściany
+        curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLACK)  # kropki
+        curses.init_pair(4, curses.COLOR_YELLOW, curses.COLOR_BLACK) # jabłka
 
-        # Po dołączeniu do gry (join_game)
+        # Dołącz do gry (wysyłamy join_game)
         self.join_game()
 
         while self.running:
-            try:
-                key = stdscr.getch()
-                if key == ord('q'):
-                    self.running = False
-                    break
-                elif key == ord('r'):
-                    # globalny restart
-                    msg = {
-                        "type": "restart_game",
-                        "player_id": self.player_id
-                    }
-                    self.send_to_server(msg)
-                elif key in KEY_TO_DIRECTION:
-                    direction = KEY_TO_DIRECTION[key]
-                    msg = {
-                        "type": "player_move",
-                        "player_id": self.player_id,
-                        "direction": direction
-                    }
-                    self.send_to_server(msg)
-
-                stdscr.clear()
-                self.draw_game(stdscr)
-                stdscr.refresh()
-
-                time.sleep(0.1)
-            except KeyboardInterrupt:
+            key = stdscr.getch()
+            if key == ord('q'):
                 self.running = False
                 break
+            elif key == ord('r'):
+                msg = {
+                    "type": "restart_game",
+                    "player_id": self.player_id
+                }
+                self.send_to_server(msg)
+            elif key in KEY_TO_DIRECTION:
+                direction = KEY_TO_DIRECTION[key]
+                self.send_to_server({
+                    "type": "player_move",
+                    "player_id": self.player_id,
+                    "direction": direction
+                })
+
+            stdscr.clear()
+            self.draw_game(stdscr)
+            stdscr.refresh()
+
+            # NIE robimy time.sleep(0.1), bo chcemy natychmiast reagować
+            # i nodelay=False czeka na klawisz
 
         self.close()
 
@@ -184,6 +184,8 @@ class SnakeClient:
         players = self.game_state.get("players", {})
 
         room_map = maps.get(current_room, [])
+
+        # Rysowanie mapy
         for y, row_str in enumerate(room_map):
             for x, ch in enumerate(row_str):
                 if ch == WALL:
@@ -195,6 +197,7 @@ class SnakeClient:
                 else:
                     stdscr.addch(y, x, ch)
 
+        # Rysowanie węży
         for pid, pdata in players.items():
             if not pdata["alive"]:
                 continue
@@ -243,41 +246,30 @@ class SnakeClient:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Kolorowy Klient Snake + Ekran Startowy")
+    parser = argparse.ArgumentParser("Kolorowy Klient Snake + Ekran Startowy (bez podwójnego kliknięcia)")
     parser.add_argument("--player_id", type=int, default=1)
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--user", default="adminowiec")
-    parser.add_argument("--password", default="Start123!")
+    parser.add_argument("--password", default=".p=o!v0cD5kK2+F3,{c1&DB")
     args = parser.parse_args()
 
-    import curses
-    from start_screen import show_start_screen, show_description
-
     def start_menu_driver():
-        """
-        Prosta pętla do obsługi ekranu startowego.
-        Zwraca True, jeśli użytkownik wybrał "Rozpocznij grę"
-        Zwraca False, jeśli użytkownik wybrał "Wyjdź z gry"
-        """
         while True:
-            choice = curses.wrapper(show_start_screen)  # 1,2,3
+            choice = curses.wrapper(show_start_screen)
             if choice == 1:
-                # Rozpocznij grę multiplayer
                 return True
             elif choice == 2:
-                # Opis gry
                 curses.wrapper(show_description)
             elif choice == 3:
-                # Wyjdź z gry
                 return False
 
-    # Najpierw ekran startowy
+    # Ekran startowy
     start_choice = start_menu_driver()
     if not start_choice:
-        print("[CLIENT] Użytkownik wybrał Wyjdź z gry. Koniec.")
+        print("[CLIENT] Wybrano 'Wyjdź z gry'. Koniec.")
         sys.exit(0)
 
-    # Jeśli użytkownik chce rozpocząć grę multiplayer -> uruchamiamy klienta
+    # Rozpocznij grę
     cl = SnakeClient(args.player_id, args.host, args.user, args.password)
     if cl.running:
         try:
@@ -292,4 +284,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
