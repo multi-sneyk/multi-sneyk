@@ -23,7 +23,7 @@ DIR_TO_HEAD = {
 }
 
 class SnakeClient:
-    def __init__(self, player_id, host="localhost", user="adminowiec", password="Start123!"):
+    def __init__(self, player_id, host="localhost", user="adminowiec", password=".p=o!v0cD5kK2+F3,{c1&DB"):
         self.player_id = str(player_id)
         self.host = host
         self.user = user
@@ -266,7 +266,7 @@ def main():
     parser.add_argument("--player_id", type=int, default=1)
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--user", default="adminowiec")
-    parser.add_argument("--password", default="Start123!")
+    parser.add_argument("--password", default=".p=o!v0cD5kK2+F3,{c1&DB")
     args = parser.parse_args()
 
     cl = SnakeClient(args.player_id, args.host, args.user, args.password)
