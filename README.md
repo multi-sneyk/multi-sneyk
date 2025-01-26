@@ -1,4 +1,5 @@
 # multi-sneyk
+Projekt w dużej mierze wykonywaliśmy fizycznie razem w jednym pomieszczeniu z jednej stacji roboczej, dlatego historia commitów nie odzwierciedla rzeczywistego zaangażowania. 
 
 #### (Projekt zawiera film pokazowy z wyjaśnieniem)
 
