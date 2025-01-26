@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Serwer Multi-Sneyk:
-- 4 mapy (room0..room3)
-- Każda mapa: 5 jabłek do przejścia do następnej
-- Gdy ktoś uzbiera 5 jabłek na mapie 3 => koniec gry
-  (zwycięzca -> "Gratulacje...", reszta -> "Leszcz").
-- Restart 'r' => globalny restart do mapy0 (dla wszystkich).
-Zastosowano 2 połączenia do RabbitMQ:
-  - Jedno do consume (start_consuming)
-  - Jedno do publish (wysyłanie stanu)
-by uniknąć pop from empty deque w wielowątkowym BlockingConnection.
-"""
 
 import os
 import threading
