@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Klient gry Snake wieloosobowej.
-Klawisz 'r' wysyła żądanie restartu gry do serwera,
-który resetuje stan i ponownie dodaje wszystkie wcześniej podłączone player_id.
-
-Po zjedzeniu jabłka wąż rośnie (obsługiwane po stronie serwera).
-"""
-
 import argparse
 import json
 import threading
@@ -16,86 +8,70 @@ import time
 import curses
 import pika
 
-KEY_TO_DIRECTION = {
-    ord('h'): 'h',
-    ord('j'): 'j',
-    ord('k'): 'k',
-    ord('l'): 'l'
+DIR_TO_HEAD = {
+    'k': '^',
+    'j': 'v',
+    'h': '<',
+    'l': '>'
 }
 
-
 class SnakeClient:
-    def __init__(self, player_id, rabbitmq_host="localhost", rabbitmq_user="adminowiec", rabbitmq_pass=".p=o!v0cD5kK2+F3,{c1&DB"):
+    def __init__(self, player_id, host="localhost", user="adminowiec", password=".p=o!v0cD5kK2+F3,{c1&DB"):
         self.player_id = str(player_id)
         self.running = True
         self.game_state = {}
 
-        # Połączenie do publish
         try:
-            self.publish_connection = pika.BlockingConnection(
+            self.pub_conn = pika.BlockingConnection(
                 pika.ConnectionParameters(
-                    host=rabbitmq_host,
-                    port=5672,
-                    virtual_host='/',
-                    credentials=pika.PlainCredentials(rabbitmq_user, rabbitmq_pass)
+                    host=host, port=5672, virtual_host='/',
+                    credentials=pika.PlainCredentials(user,password)
                 )
             )
-            self.publish_channel = self.publish_connection.channel()
+            self.pub_ch = self.pub_conn.channel()
             self.server_queue = "server_queue"
-            print("[CLIENT] Połączenie publish utworzone.")
-        except pika.exceptions.AMQPConnectionError as e:
-            print(f"[ERROR] Nie udało się połączyć z RabbitMQ do publish: {e}")
-            self.running = False
+            print("[CLIENT] publish connect ok.")
+        except:
+            print("[CLIENT] publish connect fail.")
+            self.running=False
             return
 
-        # Połączenie do consume
         try:
-            self.consume_connection = pika.BlockingConnection(
+            self.con_conn = pika.BlockingConnection(
                 pika.ConnectionParameters(
-                    host=rabbitmq_host,
-                    port=5672,
-                    virtual_host='/',
-                    credentials=pika.PlainCredentials(rabbitmq_user, rabbitmq_pass)
+                    host=host, port=5672, virtual_host='/',
+                    credentials=pika.PlainCredentials(user,password)
                 )
             )
-            self.consume_channel = self.consume_connection.channel()
+            self.con_ch = self.con_conn.channel()
+            self.game_state_exchange="game_state_exchange"
+            self.con_ch.exchange_declare(exchange=self.game_state_exchange, exchange_type='fanout')
 
-            self.game_state_exchange = "game_state_exchange"
-            self.consume_channel.exchange_declare(
-                exchange=self.game_state_exchange,
-                exchange_type='fanout'
-            )
-
-            result = self.consume_channel.queue_declare(queue='', exclusive=True)
+            result=self.con_ch.queue_declare(queue='', exclusive=True)
             self.client_queue = result.method.queue
-            self.consume_channel.queue_bind(
-                exchange=self.game_state_exchange,
-                queue=self.client_queue
-            )
-            print("[CLIENT] Połączenie consume utworzone.")
-        except pika.exceptions.AMQPConnectionError as e:
-            print(f"[ERROR] Nie udało się połączyć z RabbitMQ do consume: {e}")
-            self.running = False
+            self.con_ch.queue_bind(exchange=self.game_state_exchange, queue=self.client_queue)
+            print("[CLIENT] consume connect ok.")
+        except:
+            print("[CLIENT] consume connect fail.")
+            self.running=False
             return
 
-        # Wątek odbioru
-        self.listen_thread = threading.Thread(target=self.listen_game_state, daemon=True)
+        self.listen_thread = threading.Thread(target=self.listen_loop, daemon=True)
         self.listen_thread.start()
 
-        # Dołączenie do gry
         self.join_game()
 
     def join_game(self):
         msg = {
-            "type": "join_game",
+            "type":"join_game",
             "player_id": self.player_id
         }
         self.send_to_server(msg)
-        print(f"[CLIENT] Wysłano 'join_game' (Gracz {self.player_id}).")
+        print(f"[CLIENT] join_game -> pid={self.player_id}")
 
     def send_move(self, direction):
         msg = {
-            "type": "player_move",
+            "type":"player_move",
             "player_id": self.player_id,
             "direction": direction
         }
@@ -103,46 +79,42 @@ class SnakeClient:
 
     def send_restart(self):
         msg = {
-            "type": "restart_game",
+            "type":"restart_game",
             "player_id": self.player_id
         }
         self.send_to_server(msg)
-        print("[CLIENT] Wysłano żądanie restartu gry.")
+        print("[CLIENT] globalny restart do mapy0")
 
-    def send_to_server(self, msg_dict):
+    def send_to_server(self, data):
         if not self.running:
             return
         try:
-            self.publish_channel.basic_publish(
+            self.pub_ch.basic_publish(
                 exchange='',
                 routing_key=self.server_queue,
-                body=json.dumps(msg_dict)
+                body=json.dumps(data)
             )
-        except pika.exceptions.AMQPError as e:
-            print(f"[ERROR] Nie udało się wysłać wiadomości: {e}")
+        except:
+            pass
 
-    def listen_game_state(self):
+    def listen_loop(self):
         def callback(ch, method, properties, body):
             try:
-                state = json.loads(body.decode("utf-8"))
-                self.game_state = state
-            except json.JSONDecodeError as e:
-                print(f"[ERROR] Błąd dekodowania stanu gry: {e}")
+                st = json.loads(body.decode("utf-8"))
+                self.game_state = st
+            except json.JSONDecodeError:
+                pass
 
-        self.consume_channel.basic_consume(
+        self.con_ch.basic_consume(
             queue=self.client_queue,
             on_message_callback=callback,
             auto_ack=True
         )
-
         try:
-            self.consume_channel.start_consuming()
-        except pika.exceptions.AMQPError as e:
-            print(f"[ERROR] Błąd w listen_game_state: {e}")
-        except Exception as e:
-            print(f"[ERROR] Niespodziewany błąd w listen_game_state: {e}")
-        finally:
-            self.running = False
+            self.con_ch.start_consuming()
+        except:
+            pass
+        self.running=False
 
     def run_curses(self):
         curses.wrapper(self.curses_loop)
@@ -150,122 +122,127 @@ class SnakeClient:
     def curses_loop(self, stdscr):
         curses.curs_set(0)
         stdscr.nodelay(True)
-        stdscr.clear()
 
         while self.running:
             try:
                 key = stdscr.getch()
                 if key == ord('q'):
-                    self.running = False
+                    self.running=False
                     break
-                elif key == ord('r'):
+                elif key==ord('r'):
                     self.send_restart()
-                elif key in KEY_TO_DIRECTION:
-                    self.send_move(KEY_TO_DIRECTION[key])
+                elif key in [ord('h'), ord('j'), ord('k'), ord('l')]:
+                    d = chr(key)
+                    self.send_move(d)
 
                 stdscr.clear()
                 self.draw_game(stdscr)
                 stdscr.refresh()
-                time.sleep(0.1)
 
+                time.sleep(0.1)
             except KeyboardInterrupt:
-                self.running = False
+                self.running=False
                 break
 
         self.close()
 
     def draw_game(self, stdscr):
-        if not self.game_state:
-            stdscr.addstr(0, 0, "Oczekiwanie na dane z serwera...")
+        st = self.game_state
+        if not st:
+            stdscr.addstr(0,0,"Oczekiwanie na dane z serwera...")
             return
 
-        current_room = self.game_state.get("current_room", "room0")
-        maps = self.game_state.get("maps", {})
-        players = self.game_state.get("players", {})
+        gameOver = st.get("gameOver", False)
+        winner = st.get("winner", None)
+        if gameOver and winner:
+            if winner==self.player_id:
+                stdscr.addstr(0,0,"Gratulacje, jestes mistrzem sterowania VIMem")
+            else:
+                stdscr.addstr(0,0,"Leszcz")
+            return
 
-        room_map = maps.get(current_room, [])
-        for y, row in enumerate(room_map):
-            try:
-                stdscr.addstr(y, 0, row)
-            except curses.error:
-                pass
+        current_room = st.get("current_room","")
+        maps = st.get("maps",{})
+        players = st.get("players",{})
+        room_map = maps.get(current_room,[])
+        for y, rowstr in enumerate(room_map):
+            stdscr.addstr(y,0,rowstr)
 
-        # Rysujemy węże
-        for pid, pdata in players.items():
+        # rysujemy węże
+        for pid,pdata in players.items():
             if not pdata["alive"]:
                 continue
-            if pdata["room"] != current_room:
+            if pdata["room"]!=current_room:
                 continue
-            for i, (py, px) in enumerate(pdata["positions"]):
-                c = '@' if i == 0 else 's'
-                try:
-                    stdscr.addch(py, px, c)
-                except curses.error:
-                    pass
+            poss = pdata["positions"]
+            lastDir = pdata.get("lastDir",None)
+            for i, (py,px) in enumerate(poss):
+                if i==0:
+                    # głowa
+                    if lastDir in DIR_TO_HEAD:
+                        c = DIR_TO_HEAD[lastDir]
+                    else:
+                        c = '@'
+                else:
+                    c='s'
+                stdscr.addch(py,px,c)
 
-        info_y = len(room_map) + 1
-        try:
-            stdscr.addstr(info_y, 0, f"Pokój: {current_room}")
-            stdscr.addstr(info_y + 1, 0, "Sterowanie: h/j/k/l, r=restart, q=wyjście")
+        info_y = len(room_map)+1
+        stdscr.addstr(info_y,0,f"Pokój: {current_room}")
+        stdscr.addstr(info_y+1,0,"Sterowanie: h/j/k/l, r=global restart, q=wyjście")
 
-            # Lista graczy
-            alive_pids = list(players.keys())
-            stdscr.addstr(info_y + 2, 0, f"Aktualni gracze: {', '.join(alive_pids)}")
+        # zrobimy ranking: posortuj graczy wg apples malejąco
+        # players[pid]["apples"]
+        ranking = sorted(players.items(), key=lambda kv: kv[1]["apples"], reverse=True)
 
-            if self.player_id in players:
-                pinfo = players[self.player_id]
-                alive_str = "Alive" if pinfo["alive"] else "Dead"
-                stdscr.addstr(info_y + 3, 0, f"Twój stan (Gracz {self.player_id}): {alive_str}")
-        except curses.error:
-            pass
+        line_offset=2
+        for (rpid, rdata) in ranking:
+            alive_str = "Alive" if rdata["alive"] else "Dead"
+            apples = rdata["apples"]
+            stdscr.addstr(info_y+line_offset,0,
+                          f"{rpid}: apples={apples}, {alive_str}")
+            line_offset+=1
 
     def close(self):
-        self.running = False
+        self.running=False
         try:
-            self.consume_channel.stop_consuming()
+            self.con_ch.stop_consuming()
         except:
             pass
-
         if self.listen_thread.is_alive():
             self.listen_thread.join()
 
         try:
-            self.publish_connection.close()
+            self.pub_conn.close()
         except:
             pass
         try:
-            self.consume_connection.close()
+            self.con_conn.close()
         except:
             pass
 
-        print(f"[CLIENT] Zamknięto klienta (player_id={self.player_id}).")
+        print(f"[CLIENT] Zamknięto klienta pid={self.player_id}.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Klient Snake Multiplayer")
-    parser.add_argument("--player_id", type=int, default=1, help="Identyfikator gracza, np. 1.")
-    parser.add_argument("--host", type=str, default="localhost", help="Host RabbitMQ (IP/hostname)")
-    parser.add_argument("--user", type=str, default="adminowiec", help="Użytkownik RabbitMQ")
-    parser.add_argument("--password", type=str, default=".p=o!v0cD5kK2+F3,{c1&DB", help="Hasło RabbitMQ")
+    parser = argparse.ArgumentParser("Klient Snake - 4 mapy po 5 punktów, globalny restart, ranking")
+    parser.add_argument("--player_id", type=int, default=1)
+    parser.add_argument("--host", default="localhost")
+    parser.add_argument("--user", default="adminowiec")
+    parser.add_argument("--password", default=".p=o!v0cD5kK2+F3,{c1&DB")
     args = parser.parse_args()
 
-    client = SnakeClient(
-        player_id=args.player_id,
-        rabbitmq_host=args.host,
-        rabbitmq_user=args.user,
-        rabbitmq_pass=args.password
-    )
-
-    if client.running:
+    cl = SnakeClient(args.player_id, args.host, args.user, args.password)
+    if cl.running:
         try:
-            client.run_curses()
+            cl.run_curses()
         except Exception as e:
-            print(f"[ERROR] Błąd curses: {e}")
+            print(f"[ERROR] curses: {e}")
         finally:
-            client.close()
+            cl.close()
     else:
-        print("[CLIENT] Klient nie wystartował poprawnie.")
+        print("[CLIENT] Nie wystartował poprawnie.")
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()

@@ -2,13 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-Serwer gry Snake wieloosobowej z użyciem RabbitMQ.
-Poprawki:
-- Wąż faktycznie rośnie o 1 po zjedzeniu jabłka (nie kasujemy ogona w tym ruchu).
-- Po restarcie gracze nie znikają: serwer pamięta ich ID i ponownie ich dodaje.
+Serwer Snake:
+- 4 mapy: room0..room3
+- Każda mapa wymaga 5 punktów (czyli 5 jabłek) do przejścia na kolejną.
+- Punkty resetują się przy przejściu na nową mapę.
+- globalny klawisz 'r' -> restart do mapy0, zeruje wszystko.
+- ranking graczy opiera się na "apples" w aktualnej mapie (liczba jabłek).
+- Po ukończeniu mapy3 (czwartej), jeśli ktoś zbierze 5 jabłek, gra się kończy:
+  zwycięzca -> "Gratulacje, jestes mistrzem sterowania VIMem"
+  reszta -> "Leszcz".
+- Głowa węża w stylu vim: '^','v','<','>'.
 
-Użytkownik RabbitMQ: adminowiec
-Hasło RabbitMQ: .p=o!v0cD5kK2+F3,{c1&DB
+Autor: ChatGPT
 """
 
 import os
@@ -18,386 +23,269 @@ import json
 import random
 import pika
 
-# ----- Ustawienia gry -----
-UPDATE_INTERVAL = 0.2  # co ile sekund aktualizujemy stan gry
-MAX_PLAYERS = 6        # maksymalna liczba graczy
+UPDATE_INTERVAL = 0.2
+MAX_PLAYERS = 6
 
-# ----- Pomocnicze stałe -----
+MAP_ORDER = ["room0", "room1", "room2", "room3"]  # 4 mapy
+POINTS_PER_MAP = 5  # na każdej mapie trzeba 5 jabłek
+APPLES_ON_MAP = [5, 5, 5, 5]  # minimalna liczba jabłek (możesz zwiększyć)
+
 WALL = '#'
-APPLE = 'O'    # Upewnij się, że w mapach wpisane jest duże "O" (litera), a nie zero '0'
+APPLE = 'O'
 EMPTY = '.'
 
-# Kierunki ruchu (vim-style)
 DIRECTIONS = {
-    'h': (0, -1),   # left
-    'l': (0, 1),    # right
-    'k': (-1, 0),   # up
-    'j': (1, 0)     # down
+    'h': (0, -1),
+    'l': (0, 1),
+    'k': (-1, 0),
+    'j': (1, 0)
 }
 
 
 class SnakeGame:
     """
-    Główna klasa logiki gry. Przechowuje mapy, graczy, obsługuje ruch, kolizje, jabłka itd.
+    Logika jednej mapy (jednej rundy).
+    Każdy gracz ma:
+      positions, direction, alive, room, lastDir (kierunek do rysowania głowy),
+      apples (ile jabłek w tej mapie).
     """
-
-    def __init__(self, maps_folder="maps"):
+    def __init__(self, maps_folder="maps", start_room="room0"):
         self.maps = {}
         self.load_maps(maps_folder)
+        if start_room not in self.maps:
+            if self.maps:
+                start_room = list(self.maps.keys())[0]
+            else:
+                raise ValueError("Brak map w folderze.")
 
-        self.current_room = "room0"
-        self.players = {}
+        self.current_room = start_room
+        self.height = len(self.maps[start_room])
+        self.width = len(self.maps[start_room][0])
+
+        self.players = {}  # pid -> {...}
         self.player_count = 0
-
-        if self.current_room not in self.maps:
-            raise ValueError(f"Mapa '{self.current_room}' nie została wczytana.")
-        self.height = len(self.maps[self.current_room])
-        self.width = len(self.maps[self.current_room][0])
-
         self.lock = threading.Lock()
 
-        # Przygotuj listę punktów startowych.
-        # Gracze wystartują w jednym rzędzie (center_row) ale w różnych kolumnach wokół środka.
         self.start_positions = self.generate_start_positions()
 
     def load_maps(self, folder):
-        """
-        Wczytuje pliki tekstowe z katalogu `folder` (np. room0.txt, room1.txt).
-        Zakładamy, że w mapach znak 'O' to jabłko, '#' to ściana, '.' to puste pole.
-        """
         if not os.path.isdir(folder):
-            print(f"[ERROR] Katalog maps '{folder}' nie istnieje.")
+            print(f"[ERROR] Katalog '{folder}' nie istnieje.")
             return
-
         for filename in os.listdir(folder):
             if filename.endswith(".txt"):
-                room_name = filename.replace(".txt", "")
+                rname = filename.replace(".txt","")
                 path = os.path.join(folder, filename)
-                with open(path, 'r') as f:
+                with open(path,'r') as f:
                     lines = [list(line.rstrip('\n')) for line in f]
-                self.maps[room_name] = lines
-                print(f"[INFO] Wczytano mapę '{room_name}' z pliku '{filename}'.")
+                self.maps[rname] = lines
+                print(f"[INFO] Wczytano mapę '{rname}'.")
 
     def generate_start_positions(self):
-        """
-        Generuje listę pozycji startowych w samym środku w linii poziomej.
-        Np. dla 6 graczy: [ (room0, row, midX-2), ... ] itp.
-        """
         center_row = self.height // 2
         center_col = self.width // 2
-        offset_list = [-2, -1, 0, 1, 2, 3]  # starczy dla 6 graczy
-        positions = []
-        for offset in offset_list:
+        offsets = [-2,-1,0,1,2,3]
+        positions=[]
+        for off in offsets:
             y = center_row
-            x = center_col + offset
-            positions.append((self.current_room, y, x))
+            x = center_col + off
+            positions.append((self.current_room,y,x))
         return positions
 
-    def add_player(self, player_id):
-        """
-        Dodaje nowego gracza do gry, ustawia mu pozycję i podstawowe parametry.
-        """
-        with self.lock:
-            if self.player_count >= MAX_PLAYERS:
-                print(f"[WARN] Osiągnięto limit graczy ({MAX_PLAYERS}). Gracz {player_id} nie został dodany.")
+    def add_player(self, pid):
+        if self.player_count>=MAX_PLAYERS:
+            return False
+        if self.player_count < len(self.start_positions):
+            (rm, sy, sx) = self.start_positions[self.player_count]
+        else:
+            rm = self.current_room
+            sy = self.height//2
+            sx = self.width//2
+
+        if not self.is_empty_cell(rm, sy, sx):
+            found=False
+            for y in range(1, self.height-1):
+                for x in range(1, self.width-1):
+                    if self.is_empty_cell(rm, y,x):
+                        sy,sx=y,x
+                        found=True
+                        break
+                if found:
+                    break
+            if not found:
+                print(f"[ERROR] Brak miejsca dla gracza {pid}.")
                 return False
 
-            # Wybierz startową z listy
-            if self.player_count < len(self.start_positions):
-                (room, sy, sx) = self.start_positions[self.player_count]
-            else:
-                # awaryjnie środek mapy
-                room = self.current_room
-                sy = self.height // 2
-                sx = self.width // 2
-
-            # Sprawdź, czy faktycznie wolne
-            if not self.is_empty_cell(room, sy, sx):
-                # jeśli jednak kolizja, poszukaj wolnego pola
-                found = False
-                for y in range(1, self.height - 1):
-                    for x in range(1, self.width - 1):
-                        if self.is_empty_cell(room, y, x):
-                            sy, sx = y, x
-                            found = True
-                            break
-                    if found:
-                        break
-                if not found:
-                    print(f"[ERROR] Brak wolnego miejsca dla nowego gracza {player_id}.")
-                    return False
-
-            self.players[player_id] = {
-                "positions": [(sy, sx)],
-                "direction": (0, 0),
-                "alive": True,
-                "room": room
-            }
-            self.player_count += 1
-            print(f"[INFO] Dodano gracza {player_id} w pozycji ({sy}, {sx}) w pokoju '{room}'.")
-            return True
-
-    def is_empty_cell(self, room_name, y, x):
-        """
-        Czy komórka (y, x) jest wolna (pusta lub jabłko).
-        """
-        room_map = self.maps[room_name]
-        cell = room_map[y][x]
-        if cell == WALL:
-            return False
-        # APPLE też dozwolone
+        # gracz ma 0 jabłek na tej mapie
+        self.players[pid] = {
+            "positions": [(sy,sx)],
+            "direction": (0,0),
+            "alive": True,
+            "room": rm,
+            "lastDir": None,  # do rysowania głowy
+            "apples": 0       # ile jabłek w tej mapie
+        }
+        self.player_count+=1
+        print(f"[INFO] Dodano gracza {pid} w mapie={rm}, pos=({sy},{sx})")
         return True
 
-    def update_player_direction(self, player_id, direction):
-        """
-        Ustaw nowy kierunek ruchu (vim: h, j, k, l).
-        """
-        with self.lock:
-            if player_id in self.players and self.players[player_id]["alive"]:
-                if direction in DIRECTIONS:
-                    self.players[player_id]["direction"] = DIRECTIONS[direction]
+    def remove_player(self, pid):
+        if pid in self.players:
+            del self.players[pid]
+            self.player_count -=1
+
+    def is_empty_cell(self, rm, y, x):
+        cell = self.maps[rm][y][x]
+        return (cell != WALL)
+
+    def update_player_direction(self, pid, direction):
+        p = self.players.get(pid)
+        if p and p["alive"]:
+            if direction in DIRECTIONS:
+                p["direction"] = DIRECTIONS[direction]
+                p["lastDir"] = direction
 
     def update(self):
         """
-        Główna metoda: przesuwa węże, sprawdza kolizje, węże rosną po zjedzeniu jabłka, jabłka się respawnują.
+        Aktualizujemy węże:
+        - rosną po napotkaniu 'O' (usuwamy 'O' z mapy).
+        - w polu gracza jest "apples" => zliczamy w serwerze?
+          Tutaj do zliczania wystarczyłoby p["apples"]++. (robimy to TUTAJ, by uprościć)
         """
         with self.lock:
-            dead_players = []
+            dead_pids=[]
+            for pid, p in self.players.items():
+                if not p["alive"]:
+                    continue
+                (dy, dx) = p["direction"]
+                if (dy,dx)==(0,0):
+                    continue
+                head_y, head_x = p["positions"][0]
+                ny = head_y + dy
+                nx = head_x + dx
+                rm = p["room"]
 
-            for pid, pdata in self.players.items():
-                if not pdata["alive"]:
+                # wyjście poza mapę?
+                if ny<0 or ny>=self.height or nx<0 or nx>=self.width:
+                    p["alive"]=False
+                    dead_pids.append(pid)
+                    continue
+                if self.maps[rm][ny][nx] == WALL:
+                    p["alive"]=False
+                    dead_pids.append(pid)
                     continue
 
-                (dy, dx) = pdata["direction"]
-                if (dy, dx) == (0, 0):
-                    # gracz jeszcze nie ruszył
-                    continue
-
-                head_y, head_x = pdata["positions"][0]
-                new_y = head_y + dy
-                new_x = head_x + dx
-                current_room = pdata["room"]
-
-                # -- Wyjście poza mapę => inny pokój lub kolizja --
-                if new_y < 0:
-                    new_room = self.get_adjacent_room(current_room, "up")
-                    if new_room:
-                        pdata["room"] = new_room
-                        (new_y, new_x) = self.teleport_to_room_edge(new_room, "down", head_x)
-                    else:
-                        pdata["alive"] = False
-                        dead_players.append(pid)
+                # kolizja z wężem
+                for opid, opdata in self.players.items():
+                    if not opdata["alive"]:
                         continue
-                elif new_y >= self.height:
-                    new_room = self.get_adjacent_room(current_room, "down")
-                    if new_room:
-                        pdata["room"] = new_room
-                        (new_y, new_x) = self.teleport_to_room_edge(new_room, "up", head_x)
-                    else:
-                        pdata["alive"] = False
-                        dead_players.append(pid)
-                        continue
-                elif new_x < 0:
-                    new_room = self.get_adjacent_room(current_room, "left")
-                    if new_room:
-                        pdata["room"] = new_room
-                        (new_y, new_x) = self.teleport_to_room_edge(new_room, "right", head_y)
-                    else:
-                        pdata["alive"] = False
-                        dead_players.append(pid)
-                        continue
-                elif new_x >= self.width:
-                    new_room = self.get_adjacent_room(current_room, "right")
-                    if new_room:
-                        pdata["room"] = new_room
-                        (new_y, new_x) = self.teleport_to_room_edge(new_room, "left", head_y)
-                    else:
-                        pdata["alive"] = False
-                        dead_players.append(pid)
-                        continue
-
-                room_map = self.maps[pdata["room"]]
-
-                # Kolizja ze ścianą
-                if room_map[new_y][new_x] == WALL:
-                    pdata["alive"] = False
-                    dead_players.append(pid)
-                    continue
-
-                # Kolizje z wężami
-                for other_pid, other_pdata in self.players.items():
-                    if not other_pdata["alive"]:
-                        continue
-                    if other_pid == pid:
-                        # z samym sobą
-                        if (new_y, new_x) in other_pdata["positions"]:
-                            pdata["alive"] = False
-                            dead_players.append(pid)
+                    if opid==pid:
+                        if (ny,nx) in opdata["positions"]:
+                            p["alive"]=False
+                            dead_pids.append(pid)
                             break
                     else:
-                        # z innym graczem
-                        if other_pdata["room"] == pdata["room"] and (new_y, new_x) in other_pdata["positions"]:
-                            pdata["alive"] = False
-                            dead_players.append(pid)
+                        if opdata["room"]==rm and (ny,nx) in opdata["positions"]:
+                            p["alive"]=False
+                            dead_pids.append(pid)
                             break
-
-                if pid in dead_players:
+                if pid in dead_pids:
                     continue
 
-                # Ruch węża: dodaj głowę
-                pdata["positions"].insert(0, (new_y, new_x))
-
-                # Sprawdź, czy zjadł jabłko
-                if room_map[new_y][new_x] == APPLE:
-                    # Wąż rośnie: NIE usuwamy ogona w tym ruchu
-                    room_map[new_y][new_x] = EMPTY
-                    print(f"[INFO] Gracz {pid} zjadł jabłko => wąż rośnie!")
-                    self.spawn_random_apple(pdata["room"])
+                # normalny ruch
+                p["positions"].insert(0, (ny,nx))
+                if self.maps[rm][ny][nx] == APPLE:
+                    # rośniemy
+                    self.maps[rm][ny][nx] = EMPTY
+                    # plus jabłko do p["apples"]
+                    p["apples"] +=1
                 else:
-                    # Normalny ruch => usuń ogon
-                    pdata["positions"].pop()
-
-            # Jeśli wszyscy żywi gracze w tym samym pokoju => current_room = ...
-            rooms_used = {self.players[p]["room"] for p in self.players if self.players[p]["alive"]}
-            if len(rooms_used) == 1 and len(rooms_used) > 0:
-                self.current_room = rooms_used.pop()
-
-    def spawn_random_apple(self, room_name):
-        """
-        Dodaje jabłko w losowym, wolnym miejscu mapy (gdzie nie ma węży i nie ma ścian).
-        """
-        room_map = self.maps[room_name]
-        empty_positions = []
-        for y in range(1, self.height - 1):
-            for x in range(1, self.width - 1):
-                if room_map[y][x] == EMPTY or room_map[y][x] == '.':
-                    # sprawdź, czy nie ma tam ciała węża
-                    if not self.is_snake_on_cell(room_name, y, x):
-                        empty_positions.append((y, x))
-
-        if not empty_positions:
-            print("[WARN] Brak wolnych pozycji na jabłko.")
-            return
-
-        (rand_y, rand_x) = random.choice(empty_positions)
-        room_map[rand_y][rand_x] = APPLE
-        print(f"[INFO] Nowe jabłko w pokoju={room_name}, y={rand_y}, x={rand_x}.")
-
-    def is_snake_on_cell(self, room_name, y, x):
-        for pid, pdata in self.players.items():
-            if not pdata["alive"]:
-                continue
-            if pdata["room"] == room_name and (y, x) in pdata["positions"]:
-                return True
-        return False
-
-    def get_adjacent_room(self, current_room, direction):
-        """
-        Prosta logika łącząca room0 -> room1 itp.
-        """
-        if current_room == "room0":
-            if direction == "down":
-                return "room1"
-            return None
-        elif current_room == "room1":
-            if direction == "up":
-                return "room0"
-            return None
-        return None
-
-    def teleport_to_room_edge(self, new_room, from_direction, coord):
-        """
-        Ustawia gracza na krawędź new_room w zależności od from_direction.
-        """
-        height = len(self.maps[new_room])
-        width = len(self.maps[new_room][0])
-
-        if from_direction == "up":
-            return (height - 1, coord)
-        elif from_direction == "down":
-            return (0, coord)
-        elif from_direction == "left":
-            return (coord, width - 1)
-        elif from_direction == "right":
-            return (coord, 0)
-        return (height // 2, width // 2)
+                    # normalny ruch => usuń ogon
+                    p["positions"].pop()
 
     def get_game_state(self):
         """
-        Zwraca dict z aktualnym stanem gry (mapy + gracze).
+        Zwraca stan mapy i węży, łącznie z liczbą jabłek p["apples"] w aktualnej mapie
+        (przyda się do rankingu).
         """
-        with self.lock:
-            state = {
-                "current_room": self.current_room,
-                "players": {},
-                "maps": {}
+        st = {
+            "current_room": self.current_room,
+            "players": {},
+            "maps": {}
+        }
+        for rname,rmap in self.maps.items():
+            st["maps"][rname] = ["".join(row) for row in rmap]
+
+        for pid,pdata in self.players.items():
+            st["players"][pid] = {
+                "positions": pdata["positions"],
+                "alive": pdata["alive"],
+                "room": pdata["room"],
+                "lastDir": pdata["lastDir"],
+                "apples": pdata["apples"]
             }
-            for rname, rmap in self.maps.items():
-                state["maps"][rname] = ["".join(row) for row in rmap]
-
-            for pid, pdata in self.players.items():
-                state["players"][pid] = {
-                    "positions": pdata["positions"],
-                    "alive": pdata["alive"],
-                    "room": pdata["room"]
-                }
-            return state
-
+        return st
 
 class SnakeServer:
     """
-    Serwer, który utrzymuje stan gry i komunikuje się z klientami przez RabbitMQ.
-    - Wąż rośnie po zjedzeniu jabłka.
-    - Restart gry klawiszem 'r': serwer tworzy nowy obiekt SnakeGame.
-      Ale tym razem pamiętamy, którzy gracze dołączyli (connected_players),
-      i automatycznie ich ponownie dodajemy do nowego SnakeGame().
+    Serwer:
+    - mapIndex 0..3 -> 4 mapy
+    - Każda mapa wymaga 5 jabłek (apples=5) do przejścia
+    - 'r' => globalny restart do mapIndex=0 i usunięcie wszystkich węży => nowy SnakeGame
+    - Ranking wg liczby p["apples"] (malejąco).
+    - Gdy ktoś na mapie=3 uzbiera 5 jabłek => koniec gry (ktoś wygrał).
+      - Zwycięzca => "Gratulacje..."
+      - Reszta => "Leszcz"
     """
-
     def __init__(self):
-        # Pamiętamy, którzy gracze dołączyli
+        self.mapIndex = 0
         self.connected_players = set()
 
-        self.game = SnakeGame()
-        self.running = True
+        self.gameOver = False
+        self.winner = None
+
+        # startowa gra
+        startMap = MAP_ORDER[self.mapIndex]
+        self.game = SnakeGame(start_room=startMap)
+        self.running=True
 
         try:
-            self.consume_connection = pika.BlockingConnection(
+            self.consume_conn = pika.BlockingConnection(
                 pika.ConnectionParameters(
-                    host='localhost',
-                    port=5672,
-                    virtual_host='/',
-                    credentials=pika.PlainCredentials('adminowiec', '.p=o!v0cD5kK2+F3,{c1&DB')
+                    host='localhost', port=5672, virtual_host='/',
+                    credentials=pika.PlainCredentials('adminowiec','.p=o!v0cD5kK2+F3,{c1&DB')
                 )
             )
-            self.consume_channel = self.consume_connection.channel()
+            self.consume_ch = self.consume_conn.channel()
             self.server_queue = "server_queue"
-            self.consume_channel.queue_declare(queue=self.server_queue)
-            self.consume_channel.basic_consume(
+            self.consume_ch.queue_declare(queue=self.server_queue)
+            self.consume_ch.basic_consume(
                 queue=self.server_queue,
                 on_message_callback=self.on_request,
                 auto_ack=True
             )
-            print("[SERVER] Połączenie do konsumowania utworzone.")
+            print("[SERVER] Połączenie consume OK.")
         except pika.exceptions.AMQPConnectionError as e:
-            print(f"[ERROR] Nie udało się połączyć z RabbitMQ do konsumowania: {e}")
-            self.running = False
+            print(f"[ERROR] consume connect fail: {e}")
+            self.running=False
 
         try:
-            self.publish_connection = pika.BlockingConnection(
+            self.publish_conn = pika.BlockingConnection(
                 pika.ConnectionParameters(
-                    host='localhost',
-                    port=5672,
-                    virtual_host='/',
-                    credentials=pika.PlainCredentials('adminowiec', '.p=o!v0cD5kK2+F3,{c1&DB')
+                    host='localhost', port=5672, virtual_host='/',
+                    credentials=pika.PlainCredentials('adminowiec','.p=o!v0cD5kK2+F3,{c1&DB')
                 )
             )
-            self.publish_channel = self.publish_connection.channel()
+            self.publish_ch = self.publish_conn.channel()
             self.game_state_exchange = "game_state_exchange"
-            self.publish_channel.exchange_declare(exchange=self.game_state_exchange, exchange_type='fanout')
-            print("[SERVER] Połączenie do publikowania utworzone.")
+            self.publish_ch.exchange_declare(
+                exchange=self.game_state_exchange,
+                exchange_type='fanout'
+            )
+            print("[SERVER] Połączenie publish OK.")
         except pika.exceptions.AMQPConnectionError as e:
-            print(f"[ERROR] Nie udało się połączyć z RabbitMQ do publikowania: {e}")
-            self.running = False
+            print(f"[ERROR] publish connect fail: {e}")
+            self.running=False
 
         if self.running:
             self.update_thread = threading.Thread(target=self.game_loop, daemon=True)
@@ -405,97 +293,165 @@ class SnakeServer:
             print("[SERVER] Wątek game_loop uruchomiony.")
 
     def on_request(self, ch, method, props, body):
-        """
-        Callback obsługujący wiadomości od klientów:
-        - "join_game"
-        - "player_move"
-        - "restart_game"
-        """
         try:
-            message = json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError:
-            print("[WARN] Otrzymano niepoprawny JSON.")
+            msg = json.loads(body.decode("utf-8"))
+        except:
+            print("[WARN] Niepoprawny JSON.")
             return
+        mtype = msg.get("type","")
+        pid = str(msg.get("player_id",""))
 
-        msg_type = message.get("type", "")
-        if msg_type == "join_game":
-            player_id = str(message.get("player_id"))
-            if player_id:
-                self.connected_players.add(player_id)  # zapamiętaj, że taki gracz dołączył
-                success = self.game.add_player(player_id)
-                if success:
-                    print(f"[SERVER] Gracz {player_id} dołączył do gry.")
-                else:
-                    print(f"[SERVER] Gracz {player_id} NIE dołączył.")
-        elif msg_type == "player_move":
-            player_id = str(message.get("player_id"))
-            direction = message.get("direction")
-            if player_id and direction:
-                self.game.update_player_direction(player_id, direction)
-                # ewentualnie log
-        elif msg_type == "restart_game":
-            # Dowolny gracz może zrestartować
-            print("[SERVER] Otrzymano żądanie restartu gry!")
-            # Tworzymy nową instancję SnakeGame
-            self.game = SnakeGame()
-            # Automatycznie dodajemy z powrotem wszystkich connected_players
-            for pid in self.connected_players:
+        if mtype=="join_game":
+            if pid:
+                self.connected_players.add(pid)
+                # dodaj do aktualnej mapy
                 self.game.add_player(pid)
-            print("[SERVER] Gra zrestartowana, gracze ponownie dodani.")
+
+        elif mtype=="player_move":
+            direction = msg.get("direction","")
+            if pid and direction:
+                self.game.update_player_direction(pid, direction)
+
+        elif mtype=="restart_game":
+            # globalny restart -> mapIndex=0, nowy SnakeGame("room0"), usuwamy graczy i dodajemy od nowa
+            print("[SERVER] Globalny restart do mapy0.")
+            self.mapIndex=0
+            newMap = MAP_ORDER[self.mapIndex]
+            self.game = SnakeGame(start_room=newMap)
+            for p in self.connected_players:
+                self.game.add_player(p)
+            self.gameOver=False
+            self.winner=None
+
         else:
-            print(f"[WARN] Nieznany typ wiadomości: {msg_type}")
+            print(f"[WARN] Nieznany mtype={mtype}")
+
+    def spawn_minimum_apples(self):
+        """
+        Utrzymuje minimalną liczbę jabłek = APPLES_ON_MAP[self.mapIndex].
+        """
+        need = APPLES_ON_MAP[self.mapIndex]
+        rm = self.game.current_room
+        room_map = self.game.maps[rm]
+        apples_count=0
+        for row in room_map:
+            apples_count += row.count(APPLE)
+
+        while apples_count<need:
+            free=[]
+            for y in range(1, self.game.height-1):
+                for x in range(1, self.game.width-1):
+                    if room_map[y][x] in ('.', EMPTY):
+                        # sprawdź, czy wąż
+                        if not self.is_snake_on_cell(y,x):
+                            free.append((y,x))
+            if not free:
+                print("[WARN] Brak miejsca na jabłka.")
+                break
+            (ry,rx)=random.choice(free)
+            room_map[ry][rx] = APPLE
+            apples_count+=1
+
+    def is_snake_on_cell(self, y, x):
+        for pid,pdata in self.game.players.items():
+            if pdata["alive"] and (y,x) in pdata["positions"]:
+                return True
+        return False
+
+    def check_if_map_completed(self):
+        """
+        Sprawdza, czy któryś gracz zebrał 5 jabłek (w self.game).
+        Jeśli tak -> next map (mapIndex++)
+        Jeśli mapIndex>3 -> end_game
+        Uwaga: może być kilka graczy z 5 jabłek w tym samym ticku, weźmy pierwszego?
+        Można losowo, albo brać 'pierwszego w pętli'.
+        """
+        for pid,pdata in self.game.players.items():
+            if pdata["apples"]>=POINTS_PER_MAP:  # 5
+                # przesuwamy na nast. mapę
+                winner_pid = pid
+                print(f"[SERVER] Gracz {pid} ukończył mapę {self.mapIndex} (5 jabłek).")
+                self.mapIndex+=1
+                if self.mapIndex>=len(MAP_ORDER):
+                    # koniec
+                    self.end_game(winner_pid)
+                else:
+                    # reset do nowej mapy: new SnakeGame(MAP_ORDER[self.mapIndex])
+                    nextMap = MAP_ORDER[self.mapIndex]
+                    print(f"[SERVER] Przechodzimy do mapy {self.mapIndex} => {nextMap}")
+                    self.game = SnakeGame(start_room=nextMap)
+                    # dodaj graczy od nowa (zerując ich 'apples')
+                    for cpid in self.connected_players:
+                        self.game.add_player(cpid)
+                # wystarczy przerwać pętlę
+                break
+
+    def end_game(self, winner_pid):
+        self.gameOver=True
+        self.winner=winner_pid
+        self.running=False
+        print(f"[SERVER] KONIEC GRY => zwycięzca {winner_pid}")
 
     def game_loop(self):
-        """
-        Wątek aktualizujący grę i publikujący stan do klientów co UPDATE_INTERVAL.
-        """
         while self.running:
+            if self.gameOver:
+                break
+
+            self.spawn_minimum_apples()
+
             self.game.update()
-            state = self.game.get_game_state()
-            # publikacja stanu do wymiany fanout
+            # sprawdzamy, czy ktoś zebrał 5 jabłek => next map
+            self.check_if_map_completed()
+
+            # publikacja
+            st = self.game.get_game_state()
+            st["gameOver"] = self.gameOver
+            st["winner"] = self.winner
+            # Ranking => posortuj graczy wg apples malejąco
+            # (nie jest to osobne pole w JSON, ale klienci mogą sami sortować, ewent. zrobimy "ranking"
+            # Klient ma info st["players"][pid]["apples"]
+
             try:
-                self.publish_channel.basic_publish(
-                    exchange=self.game_state_exchange,
+                self.publish_conn.channel().basic_publish(
+                    exchange="game_state_exchange",
                     routing_key='',
-                    body=json.dumps(state)
+                    body=json.dumps(st)
                 )
             except pika.exceptions.AMQPError as e:
-                print(f"[ERROR] Błąd podczas publikowania stanu gry: {e}")
-                self.running = False
+                print(f"[ERROR] publish: {e}")
+                self.running=False
 
             time.sleep(UPDATE_INTERVAL)
 
     def start_server(self):
         if not self.running:
-            print("[SERVER] Serwer nie wystartował poprawnie.")
+            print("[SERVER] Nie wystartował poprawnie.")
             return
         print("[SERVER] Serwer wystartował. Oczekiwanie na klientów...")
         try:
-            self.consume_channel.start_consuming()
+            self.consume_ch.start_consuming()
         except KeyboardInterrupt:
             print("[SERVER] Przerwano serwer (Ctrl+C).")
         finally:
-            self.running = False
-            # sprzątanie
+            self.running=False
             try:
-                self.consume_channel.stop_consuming()
+                self.consume_ch.stop_consuming()
             except:
                 pass
-            if hasattr(self, 'update_thread') and self.update_thread.is_alive():
+            if hasattr(self,'update_thread') and self.update_thread.is_alive():
                 self.update_thread.join()
 
             try:
-                self.consume_connection.close()
+                self.consume_conn.close()
             except:
                 pass
             try:
-                self.publish_connection.close()
+                self.publish_conn.close()
             except:
                 pass
-
             print("[SERVER] Serwer zamknięty.")
 
 
-if __name__ == "__main__":
-    server = SnakeServer()
-    server.start_server()
+if __name__=="__main__":
+    srv = SnakeServer()
+    srv.start_server()
