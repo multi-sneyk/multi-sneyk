@@ -214,7 +214,7 @@ class SnakeClient:
 
         # Autorzy
         maxy, maxx = stdscr.getmaxyx()
-        authors = "Autor1, Autor2, Autor3"
+        authors = "Paweł, Kuba, Adam"
         try:
             stdscr.addstr(maxy-1, 2, authors)
         except curses.error:
