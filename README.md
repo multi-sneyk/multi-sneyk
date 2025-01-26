@@ -17,7 +17,7 @@ Strona serwerowa (RabbitMQ + plik server.py oraz mapy) jest hostowana na serwerz
 
 `pip install pika`
 
-### Na systemie Windows dodatkowo instalujemy jedną bibliotekę 
+Na systemie Windows dodatkowo instalujemy bibliotekę `windows-curses`.
 
 `pip install windows-curses`
 
