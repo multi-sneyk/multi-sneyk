@@ -5,13 +5,20 @@
 Klasyka w nowym wydaniu. Snake multi player, gdzie po zdobyciu 5 jabłuszek jesteśmy przeteleportowani do nowej trudniejszej mapy. 
 
 ## Funkcje gry
-Tryb Wieloosobowy: Gra umożliwia jednoczesne uczestnictwo do 6 graczy.
-Mechanika gry: 
+ Tryb Wieloosobowy: Gra umożliwia jednoczesne uczestnictwo do 6 graczy.
+ 
+ Mechanika gry:
+ 
 -Gracze sterują wężami za pomocą klawiszy w stylu VIM (h, j, k, l)
+
 -Celem jest zebranie co najmniej 5 jabłek na każdej z czterech map, unikając kolizji z innymi graczami, ścianami i własnym ogonem.
+
 Mapy: Po zebraniu wymaganego celu jabłek gra przechodzi na następną mapę.
+
 Rozgrywka w Czasie Rzeczywistym: Węże poruszają się płynnie i jednocześnie, co zwiększa poziom rywalizacji.
+
 Restart Gry: Dostępny globalny restart, umożliwiający powrót do pierwszej mapy i rozpoczęcie rozgrywki od nowa.
+
 
 ## Działanie gry
 #### Serwer:
