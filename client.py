@@ -143,6 +143,8 @@ class SnakeClient:
         curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
         # 3 -> białe kropki ('.')
         curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLACK)
+        # 4 - > zolte jablka ('O')
+        curses.init_pair(4, curses.COLOR_YELLOW, curses.COLOR_BLACK)
 
         while self.running:
             try:
@@ -209,8 +211,11 @@ class SnakeClient:
                 elif ch == '.':
                     # kropka -> kolor biały (pair=3)
                     stdscr.addch(y, x, ch, curses.color_pair(3))
+                elif ch == 'O':
+                    # jabłko -> kolor żółty (pair=4)
+                    stdscr.addch(y, x, ch, curses.color_pair(4))
                 else:
-                    # pozostałe znaki (np. 'O' jabłko) -> domyślny
+                    # pozostałe znaki w domyślnym kolorze
                     stdscr.addch(y, x, ch)
 
         # Rysujemy węże (w kolorze zielonym)
