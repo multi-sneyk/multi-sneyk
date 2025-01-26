@@ -8,7 +8,8 @@ Możemy wyłączyć sesję za pomocą klawisza "Q"
 
 Strona serwerowa (RabbitMQ + plik server.py oraz mapy) jest hostowana na serwerze z publicznym adresem IP, dzięki czemu do zagrania wystarczy uruchomić samą client.py.
 
-Do uruchomienia wystarczy użyć poniższych komend:
+
+## Uruchomienie gry
 
 `python3 -m venv ~/sneyk`
 
@@ -16,11 +17,9 @@ Do uruchomienia wystarczy użyć poniższych komend:
 
 `pip install pika`
 
-## Na systemie Windows dodatkowo instalujemy jedną bibliotekę 
+### Na systemie Windows dodatkowo instalujemy jedną bibliotekę 
 
 `pip install windows-curses`
-
-## Uruchomienie gry
 
 `python3 client.py --player_id 1 --host 20.82.1.111 --user adminowiec --password '.p=o!v0cD5kK2+F3,{c1&DB'`
 

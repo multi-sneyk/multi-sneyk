@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+    #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
@@ -11,9 +11,6 @@ Serwer Snake:
 - Po ukończeniu mapy3 (czwartej), jeśli ktoś zbierze 5 jabłek, gra się kończy:
   zwycięzca -> "Gratulacje, jestes mistrzem sterowania VIMem"
   reszta -> "Leszcz".
-- Głowa węża w stylu vim: '^','v','<','>'.
-
-Autor: ChatGPT
 """
 
 import os
